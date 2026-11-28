@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Private email-verified agreement receipts; deployment is a separate release action.
+Parameters:
+  VerificationFrom:
+    Type: String
+    Description: Existing verified SES sender; do not create or alter mailbox routing.
+    AllowedPattern: '[A-Za-z0-9._+%-]+@yourmood\.ai'
+  SenderIdentityArn:
+    Type: String
+    AllowedPattern: 'arn:aws:ses:us-east-1:463509296941:identity/.+'
+    Description: Explicitly authorized, verified SES identity in the target account.
+Rules:
+  TargetAccount:
+    Assertions:
+      - Assert: !Equals [!Ref AWS::AccountId, '463509296941']
+        AssertDescription: Deploy only to the explicitly authorized awill account.
+  TargetRegion:
+    Assertions:
+      - Assert: !Equals [!Ref AWS::Region, us-east-1]
+        AssertDescription: Deploy only to us-east-1.
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    Timeout: 25
+    MemorySize: 256
+Resources:
+  Receipts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      VersioningConfiguration: {Status: Enabled}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ['https://yourmood.ai']
+            AllowedMethods: [PUT]
+            AllowedHeaders: [content-type, content-length, x-amz-checksum-sha256, if-none-match]
+            ExposedHeaders: [x-amz-version-id]
+            MaxAge: 300
+      LifecycleConfiguration:
+        Rules:
+          - Id: temporary-uploads
+            Status: Enabled
+            Prefix: pending/
+            ExpirationInDays: 1
+            NoncurrentVersionExpiration: {NoncurrentDays: 1}
+            AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Receipts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: require_tls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt Receipts.Arn, !Sub '${Receipts.Arn}/*']
+            Condition: {Bool: {'aws:SecureTransport': 'false'}}
+          - Sid: create_only_receipts
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: [!Sub '${Receipts.Arn}/pending/*', !Sub '${Receipts.Arn}/receipts/*']
+            Condition: {'Null': {'s3:if-none-match': 'true'}}
+  State:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: subject, AttributeType: S}
+      KeySchema: [{AttributeName: pk, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: by_subject
+          KeySchema: [{AttributeName: subject, KeyType: HASH}]
+          Projection: {ProjectionType: ALL}
+      TimeToLiveSpecification: {AttributeName: ttl, Enabled: true}
+      SSESpecification: {SSEEnabled: true}
+  SigningKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Acceptance receipt integrity; does not assert legal identity.
+      KeySpec: RSA_2048
+      KeyUsage: SIGN_VERIFY
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'}
+            Action: kms:*
+            Resource: '*'
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ['https://yourmood.ai']
+        AllowMethods: [POST]
+        AllowHeaders: [content-type]
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 5
+        ThrottlingRateLimit: 2
+  Service:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: app.handler
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          RECEIPTS_BUCKET: !Ref Receipts
+          STATE_TABLE: !Ref State
+          SIGNING_KEY: !GetAtt SigningKey.Arn
+          VERIFICATION_FROM: !Ref VerificationFrom
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:Scan, dynamodb:ConditionCheckItem]
+              Resource: [!GetAtt State.Arn, !Sub '${State.Arn}/index/by_subject']
+            - Effect: Allow
+              Action: [s3:GetObject, s3:GetObjectVersion]
+              Resource: [!Sub '${Receipts.Arn}/registry/active.json', !Sub '${Receipts.Arn}/pending/*', !Sub '${Receipts.Arn}/receipts/*']
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: [!Sub '${Receipts.Arn}/pending/*', !Sub '${Receipts.Arn}/receipts/*']
+            - Effect: Allow
+              Action: s3:DeleteObjectVersion
+              Resource: !Sub '${Receipts.Arn}/receipts/*'
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Receipts.Arn
+            - Effect: Allow
+              Action: s3:ListBucketVersions
+              Resource: !GetAtt Receipts.Arn
+              Condition: {StringLike: {'s3:prefix': 'receipts/*'}}
+            - Effect: Allow
+              Action: kms:Sign
+              Resource: !GetAtt SigningKey.Arn
+            - Effect: Allow
+              Action: ses:SendEmail
+              Resource: !Ref SenderIdentityArn
+              Condition: {StringEquals: {'ses:FromAddress': !Ref VerificationFrom}}
+      Events:
+        Challenge: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /challenges, Method: POST}}
+        Verification: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /verification, Method: POST}}
+        Upload: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /uploads, Method: POST}}
+        Finalize: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /finalize, Method: POST}}
+        Access: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /receipts, Method: POST}}
+        Close: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /close, Method: POST}}
+        Cleanup:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Input: '{"source":"legal.receipts.cleanup"}'
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Service}'
+      RetentionInDays: 7
+Outputs:
+  ApiUrl: {Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com'}
+  ReceiptsBucket: {Value: !Ref Receipts}
+  StateTable: {Value: !Ref State}
+  PublicSigningKeyId: {Value: !GetAtt SigningKey.Arn}

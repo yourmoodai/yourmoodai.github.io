@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "documents": [
+    {"id":"website-privacy","title":"Company privacy policy","version":"1.0.0","source":"legal/website-privacy.md","path":"/legal/privacy/"},
+    {"id":"website-terms","title":"Website terms","version":"1.0.0","source":"legal/website-terms.md","path":"/legal/terms/"},
+    {"id":"savior-privacy","title":"Savior privacy notice","version":"1.0.0","source":"legal/savior-privacy.md","path":"/legal/savior/privacy/"},
+    {"id":"savior-software-terms","title":"Savior software and receipt-service terms","version":"1.0.0","source":"legal/savior-software-terms.md","path":"/legal/savior/terms/"}
+  ]
+}

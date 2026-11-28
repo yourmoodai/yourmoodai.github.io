@@ -1,0 +1,119 @@
+name: publish approved agreements
+on:
+  workflow_dispatch:
+    inputs:
+      release_id: {description: Unique release identifier, required: true, type: string}
+      effective_at: {description: Approved future UTC timestamp ending in Z, required: true, type: string}
+      receipt_api: {description: Activated receipt API URL, required: true, type: string}
+permissions:
+  contents: read
+concurrency:
+  group: legal-publication
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pages: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, ref: '${{ github.sha }}'}
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - run: uv venv --python 3.12
+      - run: uv pip sync --require-hashes requirements-dev.txt
+      - run: .venv/bin/python -m unittest discover -s tests -v
+      - run: .venv/bin/cfn-lint infra/receipts/template.yaml
+      - name: check Pages and human approval configuration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: .venv/bin/python scripts/release_control.py configuration --release-id "$RELEASE_ID"
+      - name: build exact release
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          EFFECTIVE_AT: ${{ inputs.effective_at }}
+          RECEIPT_API: ${{ inputs.receipt_api }}
+        run: .venv/bin/python scripts/legal.py build --release-id "$RELEASE_ID" --effective-at "$EFFECTIVE_AT" --receipt-api "$RECEIPT_API"
+      - run: .venv/bin/python scripts/legal.py ready --manifest public/legal/manifest.json
+      - name: prepare review bundle
+        run: |
+          mkdir -p .cache/legal
+          tar -czf .cache/legal/site.tar.gz -C public .
+          cp public/legal/manifest.json .cache/legal/manifest.json
+          .venv/bin/python -c 'import sys; sys.path.insert(0,"scripts"); from legal import digest; from pathlib import Path; print("Approve the exact manifest by entering this environment-review comment: `approve legal " + digest(Path(".cache/legal/manifest.json").read_bytes()) + "`")' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: build-attestation
+        with:
+          subject-path: |
+            .cache/legal/site.tar.gz
+            .cache/legal/manifest.json
+      - name: retain build verification bundle
+        env: {BUNDLE_PATH: '${{ steps.build-attestation.outputs.bundle-path }}'}
+        run: cp "$BUNDLE_PATH" .cache/legal/build.attestation.jsonl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: legal-release
+          path: .cache/legal/
+          include-hidden-files: true
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with: {path: public/, name: legal-pages}
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: legal-publication
+      url: https://yourmood.ai/legal/
+    permissions:
+      contents: write
+      actions: read
+      pages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, ref: '${{ github.sha }}'}
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - run: uv venv --python 3.12
+      - run: uv pip sync --require-hashes requirements.txt
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: {name: legal-release, path: .cache/legal/}
+      - name: verify attested bundle
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          gh attestation verify .cache/legal/site.tar.gz --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/legal-release.yml" --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
+          gh attestation verify .cache/legal/manifest.json --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/legal-release.yml" --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
+          .venv/bin/python scripts/legal.py ready --manifest .cache/legal/manifest.json
+      - name: bind human approval
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: .venv/bin/python scripts/release_control.py approval --manifest .cache/legal/manifest.json --output .cache/legal/approval.json
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        id: deployment
+        with: {artifact_name: legal-pages}
+      - name: observe public content
+        run: .venv/bin/python scripts/legal.py observe --manifest .cache/legal/manifest.json --approval .cache/legal/approval.json --output .cache/legal/publication-receipt.json
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: publication-attestation
+        with: {subject-path: .cache/legal/publication-receipt.json}
+      - name: retain publication verification bundle
+        env: {BUNDLE_PATH: '${{ steps.publication-attestation.outputs.bundle-path }}'}
+        run: cp "$BUNDLE_PATH" .cache/legal/publication.attestation.jsonl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publication-receipt
+          path: .cache/legal/
+          include-hidden-files: true
+      - name: retain public evidence as release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          .venv/bin/python -c 'from pathlib import Path; Path(".cache/legal/release-notes.md").write_text("Publication evidence for the approved agreement text. This does not certify legal enforceability or individual acceptance.\n")'
+          gh release create "legal-$RELEASE_ID" --target "$SOURCE_COMMIT" --title "Agreements $RELEASE_ID" --notes-file .cache/legal/release-notes.md .cache/legal/manifest.json .cache/legal/site.tar.gz .cache/legal/approval.json .cache/legal/publication-receipt.json .cache/legal/build.attestation.jsonl .cache/legal/publication.attestation.jsonl

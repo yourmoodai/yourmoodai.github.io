@@ -1,0 +1,9 @@
+.cache/
+public/
+.venv/
+__pycache__/
+*.pyc
+.aws-sam/
+*.pem
+!legal/keys/*.pem
+.env

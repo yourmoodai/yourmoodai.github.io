@@ -1,0 +1,12 @@
+{
+  "version":"2.0.0",
+  "tasks":[
+    {"label":"build legal preview","type":"process","command":"make","args":["build"],"problemMatcher":[]},
+    {"label":"run legal preview","type":"process","command":"make","args":["preview"],"problemMatcher":[]},
+    {"label":"check legal site","type":"process","command":"make","args":["check"],"problemMatcher":[]},
+    {"label":"test legal and receipts","type":"process","command":"make","args":["test"],"problemMatcher":[]},
+    {"label":"debug legal build","type":"process","command":"make","args":["debug"],"problemMatcher":[]},
+    {"label":"profile legal memory","type":"process","command":"make","args":["profile"],"problemMatcher":[]},
+    {"label":"validate receipt infrastructure","type":"process","command":"make","args":["infrastructure-check"],"problemMatcher":[]}
+  ]
+}
