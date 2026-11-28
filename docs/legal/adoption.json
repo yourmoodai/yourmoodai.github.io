@@ -1,0 +1,18 @@
+{
+  "schema":1,
+  "company":"Your Mood, Inc.",
+  "contact":"support@yourmood.ai",
+  "public_address":"email_only",
+  "copyright_ownership":"company_confirmed",
+  "aws_account":"463509296941",
+  "aws_region":"us-east-1",
+  "checks":{
+    "company_facts":{"status":"pending","evidence":[]},
+    "email_operations":{"status":"pending","evidence":[]},
+    "retention_operations":{"status":"pending","evidence":[]},
+    "jurisdiction_review":{"status":"pending","evidence":[]},
+    "licensing_audit":{"status":"pending","evidence":[]},
+    "privacy_runtime":{"status":"pending","evidence":[]},
+    "receipt_live_verification":{"status":"pending","evidence":[]}
+  }
+}
